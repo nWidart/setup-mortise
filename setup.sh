@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Installs the command line tool of Mortise from a release of mortise-dev/mortise:
 # finds the tag, picks the archive of the runner, checks its SHA-256 against the sums file of the
-# release, unpacks it and adds its folder to PATH. action.yml runs it with bash on Linux, macOS and
+# release, unpacks it and adds its folder to PATH. main.js runs it with bash on Linux, macOS and
 # Windows (Git Bash).
 #
 # Environment: INPUT_VERSION (latest, vX.Y.Z or X.Y.Z), INPUT_TOKEN (optional, for the GitHub API),
-# and the variables of the runner: RUNNER_OS, RUNNER_ARCH, RUNNER_TEMP, GITHUB_PATH, GITHUB_OUTPUT.
+# and the variables of the runner: RUNNER_OS, RUNNER_ARCH, RUNNER_TEMP, GITHUB_PATH, GITHUB_OUTPUT,
+# GITHUB_STATE.
 # SETUP_MORTISE_BASE_URL replaces the download address for the tests of this repository.
 set -euo pipefail
 
@@ -103,8 +104,15 @@ fi
 
 if [ "$RUNNER_OS" = Windows ]; then
   cygpath -w "$install" >> "$GITHUB_PATH"
+  installed=$(cygpath -w "$install/$binary")
 else
   echo "$install" >> "$GITHUB_PATH"
+  installed=$install/$binary
 fi
 echo "version=$tag" >> "$GITHUB_OUTPUT"
+# For the post step (post.js), which finds this binary whatever the job did to PATH.
+{
+  echo "mortise=$installed"
+  echo "version=$tag"
+} >> "$GITHUB_STATE"
 echo "Installed $printed in $install."

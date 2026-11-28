@@ -93,12 +93,57 @@ Coverage comes from a clover report, so the tests run first. The checkout keeps 
         run: mortise check . --coverage build/coverage/clover.xml --format github
 ```
 
+### With past history
+
+`backfill: true` fills the past weeks of the app in [Mortise Cloud](https://mortisecloud.com) with
+`mortise backfill`, so the charts do not start on the day of the first push:
+
+```yaml
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: mortise-dev/setup-mortise@v1
+        with:
+          backfill: true
+          path: .
+        env:
+          MORTISE_TOKEN: ${{ secrets.MORTISE_TOKEN }}
+
+      - name: Send the snapshot to Mortise Cloud
+        run: mortise push .
+        env:
+          MORTISE_TOKEN: ${{ secrets.MORTISE_TOKEN }}
+```
+
+- The backfill runs in the post step of the action, after the other steps of the job, so the push of the
+  commit that is checked out arrives first. It reads one commit per past week and sends each one.
+- It runs only on a `push` to the default branch of the repository, and only when `MORTISE_TOKEN` is set.
+  On every other run, such as a pull request, it does nothing and prints nothing.
+- It runs only when the job succeeded: a failed step before it means no backfill on that run.
+- The backfill never fails the job. When Mortise Cloud refuses it, is out of reach, or the token is wrong,
+  the step prints a warning and the job goes on. The next run tries again.
+- The input can stay in the workflow. Once the past weeks are filled, a run costs one request.
+- The post step reads `MORTISE_TOKEN`, and `MORTISE_CLOUD_URL` when it is set, from the `env` of the
+  `setup-mortise` step or of the job. A token set only on the step of `mortise push` does not reach it.
+- `path` is the app folder, relative to the workspace. It is the folder that `mortise push` reads.
+- It needs Mortise 1.3.0 or later. With an older pinned `version`, the step prints a warning and sends
+  nothing.
+
+The backfill needs the full history: keep `fetch-depth: 0`. On a shallow clone it sends nothing and says so.
+With `filter: blob:none`, the clone has no file contents of past commits, so `mortise backfill` downloads
+them for each commit it reads, with the credentials of the checkout. Leave `persist-credentials` at its
+default: with `persist-credentials: false` on a private repository, every past commit is left out.
+
 ## Inputs
 
 | Input | Default | Meaning |
 |---|---|---|
 | `version` | `latest` | The release to install: `latest`, or a tag such as `v0.3.0` (`0.3.0` works too) |
 | `token` | `${{ github.token }}` | A token for the GitHub API. It is used only to find the newest release when `version` is `latest`. Without one the API allows 60 calls an hour per address |
+| `backfill` | `false` | `true` runs `mortise backfill` after the steps of the job, on a push to the default branch with `MORTISE_TOKEN` set. See [With past history](#with-past-history) |
+| `path` | `.` | The app folder that `mortise backfill` reads, relative to the workspace |
 
 Pin a version for builds that must not change on their own:
 
@@ -122,6 +167,9 @@ Pin a version for builds that must not change on their own:
 | Linux, arm64 (`ubuntu-24.04-arm`) | `mortise-vX.Y.Z-linux-arm64.tar.gz`, static |
 | macOS, Apple silicon (`macos-latest`) | `mortise-vX.Y.Z-macos-arm64.zip`, signed and notarized |
 | Windows, x64 (`windows-latest`) | `mortise-vX.Y.Z-windows-x64.zip` |
+
+The action runs on Node 24, which every runner of GitHub has. A self-hosted runner needs version 2.328 or
+later of the runner.
 
 On another runner, such as macOS on Intel, the action fails and says so. Install the tool there with
 `cargo install --locked mortise-cli`.
