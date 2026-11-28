@@ -16,10 +16,10 @@ function folder() {
 }
 
 // The environment of a post step that runs the backfill; each test changes one thing.
-function pushRun(extra = {}) {
+function pushRun(extra = {}, payload = {}) {
   const dir = folder();
   const event = path.join(dir, 'event.json');
-  fs.writeFileSync(event, JSON.stringify({ repository: { default_branch: 'main' } }));
+  fs.writeFileSync(event, JSON.stringify({ repository: { default_branch: 'main' }, ...payload }));
   return {
     INPUT_BACKFILL: 'true',
     INPUT_PATH: '.',
@@ -64,6 +64,14 @@ test('the post step does nothing on every other run', () => {
     'no event file': { GITHUB_EVENT_PATH: path.join(os.tmpdir(), 'setup-mortise-no-such-event.json') },
     'no install by the main step': { STATE_mortise: undefined, STATE_version: undefined },
   };
+  const payloads = { 'a push that deleted a branch': { deleted: true } };
+  for (const [name, payload] of Object.entries(payloads)) {
+    const env = pushRun({}, payload);
+    assert.deepEqual(plan(env), { action: 'nothing' }, name);
+    const printed = runPost(env);
+    assert.equal(printed.status, 0, name);
+    assert.equal(printed.stdout + printed.stderr, '', name);
+  }
   for (const [name, extra] of Object.entries(cases)) {
     const env = pushRun(extra);
     for (const key of Object.keys(extra)) if (extra[key] === undefined) delete env[key];
@@ -156,7 +164,9 @@ test('run prints nothing and runs nothing on a pull request', () => {
 
 test('the main step refuses a backfill that is not true or false', () => {
   const main = path.join(__dirname, '..', 'main.js');
-  const printed = spawnSync(process.execPath, [main], { env: { ...process.env, INPUT_BACKFILL: 'yes' }, encoding: 'utf8' });
-  assert.equal(printed.status, 1);
-  assert.equal(printed.stdout, "::error::The input backfill is 'yes', not true or false.\n");
+  for (const value of ['yes', 'yes\n::set-output name=version::v9.9.9']) {
+    const printed = spawnSync(process.execPath, [main], { env: { ...process.env, INPUT_BACKFILL: value }, encoding: 'utf8' });
+    assert.equal(printed.status, 1);
+    assert.equal(printed.stdout, '::error::The input backfill must be true or false.\n');
+  }
 });

@@ -16,7 +16,8 @@ function bash() {
 }
 
 if (readBackfill(process.env.INPUT_BACKFILL) === undefined) {
-  console.log(`::error::The input backfill is '${process.env.INPUT_BACKFILL}', not true or false.`);
+  // The value is not printed: a line break in it could start a workflow command of its own.
+  console.log('::error::The input backfill must be true or false.');
   process.exit(1);
 }
 

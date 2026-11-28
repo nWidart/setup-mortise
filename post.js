@@ -31,9 +31,12 @@ function hasBackfill(version) {
   return true;
 }
 
+// The default branch of the repository, or undefined when the push deleted a branch: such a push
+// can run on the default branch although it brought no commit.
 function defaultBranch(eventPath) {
   try {
-    return JSON.parse(fs.readFileSync(eventPath, 'utf8')).repository?.default_branch;
+    const event = JSON.parse(fs.readFileSync(eventPath, 'utf8'));
+    return event.deleted ? undefined : event.repository?.default_branch;
   } catch {
     return undefined;
   }
