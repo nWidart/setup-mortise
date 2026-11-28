@@ -3,9 +3,11 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const url = require('node:url');
 const { spawnSync } = require('node:child_process');
 const { readBackfill, hasBackfill, plan, run } = require('../post.js');
 
@@ -173,79 +175,96 @@ test('the main step refuses a backfill that is not true or false', () => {
 
 test('the post step runs unless the job was cancelled', () => {
   const action = fs.readFileSync(path.join(__dirname, '..', 'action.yml'), 'utf8');
-  const lines = action.split('\n').filter((line) => /^\s*post-if:/.test(line));
+  const lines = action.split(/\r?\n/).filter((line) => /^\s*post-if:/.test(line));
   assert.deepEqual(lines, ["  post-if: '!cancelled()'"]);
 });
 
-// The main step with a fake release served from file://, as Linux on x64 names it. Gives the exit
-// code and what it wrote to GITHUB_STATE.
-function mainStep(release) {
+// The archive of this runner, named as setup.sh names it.
+const windows = process.platform === 'win32';
+const platform = { linux: 'linux', darwin: 'macos', win32: 'windows' }[process.platform];
+const arch = process.arch === 'arm64' ? 'arm64' : windows ? 'x64' : 'x86_64';
+const archive = `mortise-v1.3.0-${platform}-${arch}.${platform === 'linux' ? 'tar.gz' : 'zip'}`;
+const binary = windows ? 'mortise.exe' : 'mortise';
+
+// A release of v1.3.0 in folder: an archive that holds program as mortise, and a sums file that
+// gives sum, or the SHA-256 of the archive.
+function makeRelease(folder, program, sum) {
+  const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'setup-mortise-stage-'));
+  const tag = path.join(folder, 'v1.3.0');
+  fs.mkdirSync(tag, { recursive: true });
+  fs.copyFileSync(program, path.join(stage, binary));
+  fs.chmodSync(path.join(stage, binary), 0o755);
+  // The tar of Windows and of macOS writes a zip; the tar of Git for Windows cannot.
+  const tar = windows ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe') : 'tar';
+  const format = archive.endsWith('.zip') ? ['--format', 'zip', '-cf'] : ['-czf'];
+  const packed = spawnSync(tar, [...format, path.join(tag, archive), '-C', stage, binary], { encoding: 'utf8' });
+  assert.equal(packed.status, 0, packed.stderr);
+  const real = crypto.createHash('sha256').update(fs.readFileSync(path.join(tag, archive))).digest('hex');
+  fs.writeFileSync(path.join(tag, 'Mortise-v1.3.0-SHA256SUMS.txt'), `${sum ?? real}  ${archive}\n`);
+}
+
+// Runs main.js as the runner does, with the release served from file://. Gives the exit code, what
+// it printed, and the environment the runner gives the post step for what it wrote to GITHUB_STATE.
+function mainStep(made) {
   const dir = folder();
   const temp = path.join(dir, 'temp');
   fs.mkdirSync(temp);
   for (const file of ['state', 'output', 'path']) fs.writeFileSync(path.join(dir, file), '');
+  if (made) made(path.join(dir, 'release'));
   const env = {
-    PATH: process.env.PATH,
+    ...process.env,
     INPUT_VERSION: 'v1.3.0',
     INPUT_BACKFILL: 'true',
-    RUNNER_OS: 'Linux',
-    RUNNER_ARCH: 'X64',
+    RUNNER_OS: { linux: 'Linux', darwin: 'macOS', win32: 'Windows' }[process.platform],
+    RUNNER_ARCH: process.arch === 'arm64' ? 'ARM64' : 'X64',
     RUNNER_TEMP: temp,
     GITHUB_STATE: path.join(dir, 'state'),
     GITHUB_OUTPUT: path.join(dir, 'output'),
     GITHUB_PATH: path.join(dir, 'path'),
-    SETUP_MORTISE_BASE_URL: `file://${dir}/release`,
+    SETUP_MORTISE_BASE_URL: url.pathToFileURL(path.join(dir, 'release')).href,
   };
-  if (release) release(path.join(dir, 'release', 'v1.3.0'), dir);
   const done = spawnSync(process.execPath, [path.join(__dirname, '..', 'main.js')], { env, encoding: 'utf8' });
-  return { status: done.status, state: fs.readFileSync(env.GITHUB_STATE, 'utf8') };
+  const state = {};
+  for (const line of fs.readFileSync(env.GITHUB_STATE, 'utf8').split(/\r?\n/).filter(Boolean)) {
+    const at = line.indexOf('=');
+    state[`STATE_${line.slice(0, at)}`] = line.slice(at + 1);
+  }
+  return { status: done.status, printed: done.stdout + done.stderr, state };
 }
 
-// A release whose archive holds a mortise that prints `printed` for --version, with a right sum.
-function release(printed) {
-  return (folder, dir) => {
-    const stage = path.join(dir, 'stage');
-    fs.mkdirSync(stage);
-    fs.mkdirSync(folder, { recursive: true });
-    fs.writeFileSync(path.join(stage, 'mortise'), `#!/bin/sh\necho '${printed}'\n`, { mode: 0o755 });
-    const archive = 'mortise-v1.3.0-linux-x86_64.tar.gz';
-    const packed = spawnSync('tar', ['-czf', path.join(folder, archive), '-C', stage, 'mortise']);
-    assert.equal(packed.status, 0);
-    const sum = require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(folder, archive))).digest('hex');
-    fs.writeFileSync(path.join(folder, 'Mortise-v1.3.0-SHA256SUMS.txt'), `${sum}  ${archive}\n`);
-  };
+// A program that prints `printed` for --version: a shell script, or on Windows a copy of Node, which
+// prints its own version.
+function program(printed) {
+  if (windows) return process.execPath;
+  const file = path.join(folder(), 'mortise');
+  fs.writeFileSync(file, `#!/bin/sh\necho '${printed}'\n`, { mode: 0o755 });
+  return file;
 }
 
-test('a main step that fails half way writes no state, so the post step does nothing', posix, () => {
+test('a main step that fails half way writes no state, so the post step does nothing', () => {
+  const other = program('mortise 9.9.9');
   const cases = {
-    'no release': undefined,
-    'a binary that prints another version': release('mortise 9.9.9'),
+    'no release': [undefined, /Could not download/],
+    'a wrong SHA-256': [(release) => makeRelease(release, other, '0'.repeat(64)), /The SHA-256 of/],
+    'a binary that prints another version': [(release) => makeRelease(release, other), /holds a binary that prints/],
   };
-  for (const [name, made] of Object.entries(cases)) {
+  for (const [name, [made, error]] of Object.entries(cases)) {
     const main = mainStep(made);
     assert.equal(main.status, 1, name);
-    assert.equal(main.state, '', name);
+    assert.match(main.printed, error, name);
+    assert.deepEqual(main.state, {}, name);
     const env = pushRun();
     delete env.STATE_mortise;
     delete env.STATE_version;
-    const printed = runPost({ ...env, ...stateOf(main.state) });
+    const printed = runPost({ ...env, ...main.state });
     assert.equal(printed.status, 0, name);
     assert.equal(printed.stdout + printed.stderr, '', name);
   }
-  // The same release with the right version installs and writes the state the post step reads.
-  const main = mainStep(release('mortise 1.3.0'));
-  assert.equal(main.status, 0);
-  assert.match(main.state, /^mortise=.*\nversion=v1\.3\.0\n$/);
-  const state = stateOf(main.state);
-  assert.equal(plan({ ...pushRun(), ...state }).mortise, state.STATE_mortise);
 });
 
-// The environment the runner gives the post step for the lines of GITHUB_STATE.
-function stateOf(text) {
-  const env = {};
-  for (const line of text.split('\n').filter(Boolean)) {
-    const at = line.indexOf('=');
-    env[`STATE_${line.slice(0, at)}`] = line.slice(at + 1);
-  }
-  return env;
-}
+test('a main step that installs writes the state the post step reads', posix, () => {
+  const main = mainStep((release) => makeRelease(release, program('mortise 1.3.0')));
+  assert.equal(main.status, 0, main.printed);
+  assert.equal(main.state.STATE_version, 'v1.3.0');
+  assert.equal(plan({ ...pushRun(), ...main.state }).mortise, main.state.STATE_mortise);
+});
