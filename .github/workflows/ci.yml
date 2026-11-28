@@ -21,8 +21,26 @@ jobs:
         run: shellcheck setup.sh tests/make-fixture-release.sh
       - name: actionlint
         run: |
-          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12
           ./actionlint -color
+
+  # The main and post steps in Node 24, the version the runner runs the action with. On Windows the
+  # tests that need a shell script as a fake mortise skip; the fixture job runs the real binary there.
+  unit:
+    name: Unit tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: node --test tests/post.test.js
 
   # Until a release of mortise-dev/mortise carries the command line tool, the action is tested against a
   # fixture release: a binary built from a pinned commit of Mortise, packed and summed as a release
@@ -39,7 +57,7 @@ jobs:
       run:
         shell: bash
     env:
-      MORTISE_COMMIT: a95b5fa531c2641bf5c3c1d5ab7bb8cc65f8feb8
+      MORTISE_COMMIT: e3e8af9a534c5f133aabed40867b67ef0a0c3eb8
     steps:
       - uses: actions/checkout@v5
         with:
@@ -90,6 +108,57 @@ jobs:
           status=0
           mortise check mortise/fixtures/shop-api > /dev/null || status=$?
           test "$status" -eq 1
+
+      # The post step with the binary the action installed, as on a push to the default branch. The
+      # checkout of mortise is shallow, so mortise backfill sends nothing, says why and exits 0.
+      - name: Check the post step runs the installed mortise
+        env:
+          MORTISE_TOKEN: mrt_not_a_real_token
+          MORTISE_CLOUD_URL: http://127.0.0.1:9
+          TAG: ${{ steps.fixture.outputs.tag }}
+        run: |
+          installed=$(command -v mortise)
+          if [ "$RUNNER_OS" = Windows ]; then installed=$(cygpath -w "$installed"); fi
+          echo '{"repository":{"default_branch":"main"}}' > "$RUNNER_TEMP/push.json"
+          mkdir -p "$RUNNER_TEMP/elsewhere"
+          printed=$(
+            cd "$RUNNER_TEMP/elsewhere" &&
+              INPUT_BACKFILL=true INPUT_PATH=mortise \
+                GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main GITHUB_EVENT_PATH="$RUNNER_TEMP/push.json" \
+                STATE_mortise="$installed" STATE_version="$TAG" node "$GITHUB_WORKSPACE/action/post.js" 2>&1
+          )
+          echo "$printed"
+          grep -q 'backfill needs the full history' <<<"$printed"
+          if grep -q -e '::warning::' -e "$MORTISE_TOKEN" <<<"$printed"; then exit 1; fi
+      - name: Check the post step prints nothing on a pull request
+        env:
+          MORTISE_TOKEN: mrt_not_a_real_token
+          TAG: ${{ steps.fixture.outputs.tag }}
+        run: |
+          printed=$(
+            INPUT_BACKFILL=true GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1/merge \
+              STATE_mortise="$(command -v mortise)" STATE_version="$TAG" node action/post.js 2>&1
+          )
+          test -z "$printed"
+
+      # The post step of this run, with backfill: true: it runs at the end of the job, after the
+      # step below has changed PATH and the working directory. On a pull request it prints nothing;
+      # on a push to main it reads the shallow checkout of the action and exits 0.
+      - name: Run the action with backfill
+        uses: ./action
+        with:
+          version: ${{ steps.fixture.outputs.tag }}
+          backfill: true
+          path: action
+        env:
+          SETUP_MORTISE_BASE_URL: ${{ steps.fixture.outputs.url }}
+          MORTISE_TOKEN: mrt_not_a_real_token
+          MORTISE_CLOUD_URL: http://127.0.0.1:9
+      - name: Change PATH and the working directory
+        run: |
+          mkdir -p "$RUNNER_TEMP/other-bin"
+          echo "$RUNNER_TEMP/other-bin" >> "$GITHUB_PATH"
+          cd "$RUNNER_TEMP"
 
       - name: Change the archive's line in the sums file
         env:
