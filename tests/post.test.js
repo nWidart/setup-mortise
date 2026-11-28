@@ -170,3 +170,82 @@ test('the main step refuses a backfill that is not true or false', () => {
     assert.equal(printed.stdout, '::error::The input backfill must be true or false.\n');
   }
 });
+
+test('the post step runs unless the job was cancelled', () => {
+  const action = fs.readFileSync(path.join(__dirname, '..', 'action.yml'), 'utf8');
+  const lines = action.split('\n').filter((line) => /^\s*post-if:/.test(line));
+  assert.deepEqual(lines, ["  post-if: '!cancelled()'"]);
+});
+
+// The main step with a fake release served from file://, as Linux on x64 names it. Gives the exit
+// code and what it wrote to GITHUB_STATE.
+function mainStep(release) {
+  const dir = folder();
+  const temp = path.join(dir, 'temp');
+  fs.mkdirSync(temp);
+  for (const file of ['state', 'output', 'path']) fs.writeFileSync(path.join(dir, file), '');
+  const env = {
+    PATH: process.env.PATH,
+    INPUT_VERSION: 'v1.3.0',
+    INPUT_BACKFILL: 'true',
+    RUNNER_OS: 'Linux',
+    RUNNER_ARCH: 'X64',
+    RUNNER_TEMP: temp,
+    GITHUB_STATE: path.join(dir, 'state'),
+    GITHUB_OUTPUT: path.join(dir, 'output'),
+    GITHUB_PATH: path.join(dir, 'path'),
+    SETUP_MORTISE_BASE_URL: `file://${dir}/release`,
+  };
+  if (release) release(path.join(dir, 'release', 'v1.3.0'), dir);
+  const done = spawnSync(process.execPath, [path.join(__dirname, '..', 'main.js')], { env, encoding: 'utf8' });
+  return { status: done.status, state: fs.readFileSync(env.GITHUB_STATE, 'utf8') };
+}
+
+// A release whose archive holds a mortise that prints `printed` for --version, with a right sum.
+function release(printed) {
+  return (folder, dir) => {
+    const stage = path.join(dir, 'stage');
+    fs.mkdirSync(stage);
+    fs.mkdirSync(folder, { recursive: true });
+    fs.writeFileSync(path.join(stage, 'mortise'), `#!/bin/sh\necho '${printed}'\n`, { mode: 0o755 });
+    const archive = 'mortise-v1.3.0-linux-x86_64.tar.gz';
+    const packed = spawnSync('tar', ['-czf', path.join(folder, archive), '-C', stage, 'mortise']);
+    assert.equal(packed.status, 0);
+    const sum = require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(folder, archive))).digest('hex');
+    fs.writeFileSync(path.join(folder, 'Mortise-v1.3.0-SHA256SUMS.txt'), `${sum}  ${archive}\n`);
+  };
+}
+
+test('a main step that fails half way writes no state, so the post step does nothing', posix, () => {
+  const cases = {
+    'no release': undefined,
+    'a binary that prints another version': release('mortise 9.9.9'),
+  };
+  for (const [name, made] of Object.entries(cases)) {
+    const main = mainStep(made);
+    assert.equal(main.status, 1, name);
+    assert.equal(main.state, '', name);
+    const env = pushRun();
+    delete env.STATE_mortise;
+    delete env.STATE_version;
+    const printed = runPost({ ...env, ...stateOf(main.state) });
+    assert.equal(printed.status, 0, name);
+    assert.equal(printed.stdout + printed.stderr, '', name);
+  }
+  // The same release with the right version installs and writes the state the post step reads.
+  const main = mainStep(release('mortise 1.3.0'));
+  assert.equal(main.status, 0);
+  assert.match(main.state, /^mortise=.*\nversion=v1\.3\.0\n$/);
+  const state = stateOf(main.state);
+  assert.equal(plan({ ...pushRun(), ...state }).mortise, state.STATE_mortise);
+});
+
+// The environment the runner gives the post step for the lines of GITHUB_STATE.
+function stateOf(text) {
+  const env = {};
+  for (const line of text.split('\n').filter(Boolean)) {
+    const at = line.indexOf('=');
+    env[`STATE_${line.slice(0, at)}`] = line.slice(at + 1);
+  }
+  return env;
+}
