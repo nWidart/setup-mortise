@@ -121,7 +121,10 @@ Coverage comes from a clover report, so the tests run first. The checkout keeps 
   commit that is checked out arrives first. It reads one commit per past week and sends each one.
 - It runs only on a `push` to the default branch of the repository, and only when `MORTISE_TOKEN` is set.
   On every other run, such as a pull request, it does nothing and prints nothing.
-- It runs only when the job succeeded: a failed step before it means no backfill on that run.
+- It runs also when a step before it failed, such as `mortise check` on a problem of the app. It does not
+  run when the job is cancelled, and it does nothing when the action did not install `mortise`.
+  When the step of `mortise push` failed or did not run, the backfill still sends the past weeks, and the
+  next push sends the commit that is checked out.
 - The backfill never fails the job. When Mortise Cloud refuses it, is out of reach, or the token is wrong,
   the step prints a warning and the job goes on. The next run tries again.
 - The input can stay in the workflow. Once the past weeks are filled, a run costs one request.
